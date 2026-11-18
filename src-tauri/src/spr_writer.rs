@@ -131,7 +131,7 @@ pub fn update_sprites_in_spr(
         }
     }
 
-    let max_count = std::cmp::max(existing_sprite_count, sprites_count);
+    let _max_count = std::cmp::max(existing_sprite_count, sprites_count);
 
     file.seek(SeekFrom::Start(header_size))
         .map_err(|e| format!("Failed to seek to address table: {}", e))?;

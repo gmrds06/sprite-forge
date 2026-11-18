@@ -60,6 +60,7 @@ pub struct ObdSprite {
     pub rgba: Vec<u8>,
 }
 
+#[allow(dead_code)]
 pub struct ObdObject {
     pub client_version: u16,
     pub thing: ThingType,

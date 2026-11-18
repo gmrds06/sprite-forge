@@ -191,6 +191,10 @@ export const useSpriteList = () => {
 			if (spriteIndex !== -1) {
 				const targetPage = Math.floor(spriteIndex / itemsPerPage) + 1;
 
+				if (!isInternalHighlightChange.current) {
+					setSelectedSpriteIds(new Set([highlightedSpriteId]));
+				}
+
 				if (targetPage !== currentPage) {
 					setCurrentPage(targetPage);
 					shouldScrollToHighlightedRef.current = true;
@@ -202,7 +206,7 @@ export const useSpriteList = () => {
 			}
 		}
 		isInternalHighlightChange.current = false;
-	}, [highlightedSpriteId, data, allSpriteIds, currentPage, itemsPerPage, selectedSpriteIds]);
+	}, [highlightedSpriteId, data, allSpriteIds, currentPage, itemsPerPage]);
 
 	React.useEffect(() => {
 		if (shouldScrollToHighlightedRef.current && highlightedSpriteId) {

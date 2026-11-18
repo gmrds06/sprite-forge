@@ -59,6 +59,7 @@ export const useItemList = () => {
 		setSelectedCategory,
 		notifySpritesLoaded,
 		setHighlightedItemId,
+		setHighlightedSpriteId,
 		getServerItemsForClient,
 		deleteServerItemsForClients,
 		duplicateServerItemsForClient
@@ -125,6 +126,8 @@ export const useItemList = () => {
 		if (currentPage > totalPages) setCurrentPage(totalPages);
 	}, [currentPage, totalPages]);
 
+	const [pendingSelection, setPendingSelection] = React.useState<null | { id: number; spriteId?: number; category: ThingCategory }>(null);
+
 	React.useEffect(() => {
 		if (data) {
 			const categoryChanged = prevCategoryRef.current !== selectedCategory;
@@ -132,6 +135,9 @@ export const useItemList = () => {
 			if (categoryChanged || dataChanged) {
 				prevCategoryRef.current = selectedCategory;
 				prevDataRef.current = data;
+				if (pendingSelection && pendingSelection.category === selectedCategory && !dataChanged) {
+					return;
+				}
 				setCurrentPage(1);
 				const viewport = scrollViewportRef.current?.querySelector('[data-radix-scroll-area-viewport]');
 				if (viewport) viewport.scrollTo({ top: 0, behavior: 'instant' });
@@ -145,13 +151,11 @@ export const useItemList = () => {
 				}
 			}
 		}
-	}, [data, selectedCategory, setHighlightedItemId, allItemIds]);
+	}, [data, selectedCategory, setHighlightedItemId, allItemIds, pendingSelection]);
 
 	React.useEffect(() => {
 		setInputValue(highlightedItemId ? String(toDisplayId(formatConfig, selectedCategory, highlightedItemId)) : '');
 	}, [highlightedItemId, formatConfig, selectedCategory]);
-
-	const [pendingSelection, setPendingSelection] = React.useState<null | { id: number; category: ThingCategory }>(null);
 
 	React.useEffect(() => {
 		let unlisten: undefined | (() => void);
@@ -159,9 +163,13 @@ export const useItemList = () => {
 		const setupListener = async () => {
 			const { listen } = await import('@tauri-apps/api/event');
 			unlisten = await listen('select_thing', (event: any) => {
-				const { id, category } = event.payload;
-				setPendingSelection({ id, category });
+				const { id, category, spriteId } = event.payload;
+				setPendingSelection({ id, category, spriteId });
 				setSelectedCategory(category);
+				setOpenedItemId(id, category);
+				if (spriteId && spriteId > 0) {
+					setHighlightedSpriteId(spriteId);
+				}
 			});
 		};
 
@@ -170,7 +178,7 @@ export const useItemList = () => {
 		return () => {
 			if (unlisten) unlisten();
 		};
-	}, [setSelectedCategory]);
+	}, [setSelectedCategory, setOpenedItemId, setHighlightedSpriteId]);
 
 	React.useEffect(() => {
 		if (pendingSelection && pendingSelection.category === selectedCategory) {

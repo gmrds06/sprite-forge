@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::dat_writer::ThingType;
 use crate::similarity::{
-    COLOR_GOOD, PROPS_PENALTY_MAX, SHAPE_GOOD, SpriteSignature, combine_visual, property_penalty, visual_components,
+    COLOR_GOOD, ImageDescriptor, PROPS_PENALTY_MAX, SHAPE_GOOD, SpriteSignature, combine_visual, compare_image_descriptors, property_penalty, visual_components,
 };
 
 pub struct ReferenceThing {
@@ -330,6 +330,15 @@ impl DatManager {
                         ids.insert(sid);
                     }
                 }
+                if let Some(fgs) = &thing.frame_groups_data {
+                    for fg in fgs {
+                        for &sid in &fg.sprite_index {
+                            if sid != 0 {
+                                ids.insert(sid);
+                            }
+                        }
+                    }
+                }
             }
         };
 
@@ -509,6 +518,148 @@ impl DatManager {
                 buffer.extend_from_slice(&sid.to_le_bytes());
             }
             buffer.push(score);
+        }
+        Ok(buffer)
+    }
+
+    pub fn find_by_reference_descriptors(
+        &self,
+        path: &str,
+        category: Option<&str>,
+        ref_descs: &[ImageDescriptor],
+        descriptors: &HashMap<u32, ImageDescriptor>,
+        threshold_pct: u8,
+        max_results: usize,
+    ) -> Result<Vec<u8>, String> {
+        let dat_data = self.get_data(path)
+            .ok_or_else(|| format!("No DAT data loaded for path: {}", path))?;
+
+        let non_empty_refs: Vec<&ImageDescriptor> = ref_descs.iter().filter(|d| !d.is_empty()).collect();
+        if non_empty_refs.is_empty() {
+            let mut empty = Vec::with_capacity(4);
+            empty.extend_from_slice(&0u32.to_le_bytes());
+            return Ok(empty);
+        }
+
+        let score_thing = |thing: &ThingType| -> Option<(u32, u8, u32)> {
+            let mut cand_sids: Vec<u32> = thing.sprite_index.iter().copied().filter(|&s| s != 0).collect();
+            if let Some(fgs) = &thing.frame_groups_data {
+                for fg in fgs {
+                    for &s in &fg.sprite_index {
+                        if s != 0 {
+                            cand_sids.push(s);
+                        }
+                    }
+                }
+            }
+            cand_sids.sort_unstable();
+            cand_sids.dedup();
+            if cand_sids.is_empty() {
+                return None;
+            }
+
+            let mut best_single: u8 = 0;
+            let mut best_sprite_id: u32 = cand_sids[0];
+            let mut exact_tile_hits: u32 = 0;
+            let mut total_ref_best: u32 = 0;
+            let mut strong_ref_hits: u32 = 0;
+
+            for ref_desc in &non_empty_refs {
+                let mut ref_best: u8 = 0;
+                for &sid in &cand_sids {
+                    let Some(cand_desc) = descriptors.get(&sid) else { continue };
+                    if cand_desc.is_empty() { continue; }
+                    let score = compare_image_descriptors(ref_desc, cand_desc);
+                    if score == 100 {
+                        exact_tile_hits += 1;
+                    }
+                    if score > ref_best {
+                        ref_best = score;
+                    }
+                    if score > best_single {
+                        best_single = score;
+                        best_sprite_id = sid;
+                    }
+                }
+                total_ref_best += ref_best as u32;
+                if ref_best >= 80 {
+                    strong_ref_hits += 1;
+                }
+            }
+
+            let avg_ref = (total_ref_best / non_empty_refs.len() as u32) as u8;
+            let effective_score = if exact_tile_hits > 0 {
+                100
+            } else if non_empty_refs.len() > 1 {
+                ((best_single as u32 * 7 + avg_ref as u32 * 3) / 10).max(best_single as u32) as u8
+            } else {
+                best_single
+            };
+
+            if effective_score < threshold_pct && best_single < threshold_pct {
+                return None;
+            }
+
+            let rank = exact_tile_hits * 2_000_000
+                + strong_ref_hits * 100_000
+                + (best_single as u32) * 1_000
+                + (avg_ref as u32);
+
+            Some((rank, effective_score.max(best_single), best_sprite_id))
+        };
+
+        let mut candidates: Vec<(u8, &ThingType)> = Vec::new();
+        let collections: &[(&HashMap<u32, ThingType>, u8)] = match category {
+            Some("item") => &[(&dat_data.items, 1)],
+            Some("outfit") => &[(&dat_data.outfits, 2)],
+            Some("effect") => &[(&dat_data.effects, 3)],
+            Some("missile") => &[(&dat_data.missiles, 4)],
+            None => &[
+                (&dat_data.items, 1),
+                (&dat_data.outfits, 2),
+                (&dat_data.effects, 3),
+                (&dat_data.missiles, 4),
+            ],
+            Some(cat) => return Err(format!("Invalid category: {}", cat)),
+        };
+
+        for &(collection, category_val) in collections {
+            for thing in collection.values() {
+                candidates.push((category_val, thing));
+            }
+        }
+
+        use rayon::prelude::*;
+        let mut scored: Vec<(u8, &ThingType, u32, u8, u32)> = candidates
+            .par_iter()
+            .filter_map(|&(category_val, thing)| {
+                score_thing(thing).map(|(rank, score, best_sid)| (category_val, thing, rank, score, best_sid))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.2.cmp(&a.2).then(a.1.id.cmp(&b.1.id)));
+        if max_results > 0 && scored.len() > max_results {
+            scored.truncate(max_results);
+        }
+
+        let mut buffer: Vec<u8> = Vec::with_capacity(4 + scored.len() * 36);
+        buffer.extend_from_slice(&(scored.len() as u32).to_le_bytes());
+        for (category_val, thing, _rank, score, best_sid) in scored {
+            buffer.extend_from_slice(&thing.id.to_le_bytes());
+            buffer.push(category_val);
+            buffer.push(thing.width);
+            buffer.push(thing.height);
+            buffer.push(thing.layers);
+            buffer.push(thing.pattern_x);
+            buffer.push(thing.pattern_y);
+            buffer.push(thing.pattern_z);
+            buffer.push(thing.frames);
+            buffer.extend_from_slice(&(thing.sprite_index.len() as u16).to_le_bytes());
+            for &sid in &thing.sprite_index {
+                buffer.extend_from_slice(&sid.to_le_bytes());
+            }
+            buffer.push(score);
+            buffer.extend_from_slice(&best_sid.to_le_bytes());
         }
         Ok(buffer)
     }

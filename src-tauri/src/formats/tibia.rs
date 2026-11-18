@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::spr_manager::SprManager;
 use crate::dat_reader::DatReader;
 use crate::dat_manager::DatManager;

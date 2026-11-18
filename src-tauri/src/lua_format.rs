@@ -95,6 +95,7 @@ struct AssetsBuilder {
     client_map: HashMap<u32, u32>,
 }
 
+#[allow(dead_code)]
 pub struct ScriptedAssets {
     atlases: HashMap<u16, Atlas>,
     sprites: HashMap<u32, Region>,
@@ -157,6 +158,7 @@ impl ScriptedAssets {
         self.item_map.get(&item_id).copied()
     }
 
+    #[allow(dead_code)]
     pub fn client_of(&self, server_id: u32) -> Option<u32> {
         self.client_map.get(&server_id).copied()
     }

@@ -27,7 +27,7 @@ use optimizer::{optimize_sprites_rust, apply_optimization};
 mod sprite_protocol;
 
 mod similarity;
-use similarity::{SpriteSignature, signature_compressed};
+use similarity::{ImageDescriptor, SpriteSignature, build_image_descriptor, signature_compressed};
 
 mod formats;
 use formats::FormatManagerState;
@@ -1226,6 +1226,130 @@ fn find_similar_bin(
 }
 
 #[tauri::command]
+fn find_by_image_bin(
+    request: tauri::ipc::Request,
+    spr_state: tauri::State<SprManagerState>,
+    dat_state: tauri::State<DatManagerState>,
+) -> Result<Response, String> {
+    use std::collections::HashMap;
+
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.as_slice(),
+        _ => return Err("find_by_image_bin expects a raw binary payload".to_string()),
+    };
+
+    let mut cursor = 0usize;
+    let total = bytes.len();
+    let need = |cursor: usize, n: usize, total: usize| -> Result<(), String> {
+        if cursor + n > total {
+            Err(format!("Payload truncated at offset {} (need {} bytes, have {})", cursor, n, total - cursor))
+        } else {
+            Ok(())
+        }
+    };
+
+    need(cursor, 2, total)?;
+    let tile_count = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+    cursor += 2;
+
+    need(cursor, tile_count * 4096, total)?;
+    let mut ref_descs: Vec<ImageDescriptor> = Vec::with_capacity(tile_count);
+
+    for _ in 0..tile_count {
+        let slice = &bytes[cursor..cursor + 4096];
+        cursor += 4096;
+        let desc = build_image_descriptor(slice);
+        if !desc.is_empty() {
+            ref_descs.push(desc);
+        }
+    }
+
+    need(cursor, 8, total)?;
+    let category_byte = bytes[cursor]; cursor += 1;
+    let transparent = bytes[cursor] != 0; cursor += 1;
+    let threshold_pct = bytes[cursor].min(100); cursor += 1;
+    let _reserved = bytes[cursor]; cursor += 1;
+    let max_results = u32::from_le_bytes([
+        bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
+    ]) as usize;
+    cursor += 4;
+
+    need(cursor, 2, total)?;
+    let dat_path_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+    cursor += 2;
+    need(cursor, dat_path_len, total)?;
+    let dat_path = std::str::from_utf8(&bytes[cursor..cursor + dat_path_len])
+        .map_err(|e| format!("Invalid dat_path utf-8: {}", e))?
+        .to_string();
+    cursor += dat_path_len;
+
+    need(cursor, 2, total)?;
+    let spr_path_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+    cursor += 2;
+    need(cursor, spr_path_len, total)?;
+    let spr_path = std::str::from_utf8(&bytes[cursor..cursor + spr_path_len])
+        .map_err(|e| format!("Invalid spr_path utf-8: {}", e))?
+        .to_string();
+
+    if ref_descs.is_empty() {
+        let mut empty = Vec::with_capacity(4);
+        empty.extend_from_slice(&0u32.to_le_bytes());
+        return Ok(Response::new(empty));
+    }
+
+    let category: Option<&str> = match category_byte {
+        0 => None,
+        1 => Some("item"),
+        2 => Some("outfit"),
+        3 => Some("effect"),
+        4 => Some("missile"),
+        other => return Err(format!("Invalid category byte: {}", other)),
+    };
+
+    let candidate_ids = {
+        let dat_mgr = dat_state.lock().map_err(|e| format!("DAT lock error: {}", e))?;
+        dat_mgr.collect_candidate_sprite_ids(&dat_path, category)?.into_iter().collect::<Vec<u32>>()
+    };
+
+    let sprite_data = {
+        let mut spr_mgr = spr_state.lock().map_err(|e| format!("SPR lock error: {}", e))?;
+        spr_mgr.read_sprites_list(&spr_path, candidate_ids)?
+    };
+
+    use rayon::prelude::*;
+    let described: Vec<(u32, ImageDescriptor)> = sprite_data
+        .into_par_iter()
+        .map(|s| {
+            if s.is_empty {
+                (s.id, ImageDescriptor::empty())
+            } else {
+                let rgba = decompress_to_rgba(&s.compressed_pixels, transparent);
+                (s.id, build_image_descriptor(&rgba))
+            }
+        })
+        .collect();
+
+    let mut desc_map: HashMap<u32, ImageDescriptor> = HashMap::with_capacity(described.len());
+    for (id, desc) in described {
+        desc_map.insert(id, desc);
+    }
+
+    let buffer = {
+        let dat_mgr = dat_state.lock().map_err(|e| format!("DAT lock error: {}", e))?;
+        dat_mgr.find_by_reference_descriptors(
+            &dat_path,
+            category,
+            &ref_descs,
+            &desc_map,
+            threshold_pct,
+            max_results,
+        )?
+    };
+
+    Ok(Response::new(buffer))
+}
+
+#[tauri::command]
 fn clear_dat_data(
     path: String,
     dat_state: tauri::State<DatManagerState>,
@@ -1446,8 +1570,8 @@ fn export_object_sheet_rust(
                                          let sprite_id = group.sprite_index[index];
                                          if let Some(rgba) = rgba_map.get(&sprite_id) {
                                              if let Some(img_buffer) = RgbaImage::from_raw(SPRITE_SIZE, SPRITE_SIZE, rgba.clone()) {
-                                                 let px = ((group.width as u32 - w as u32 - 1) * SPRITE_SIZE);
-                                                 let py = ((group.height as u32 - h as u32 - 1) * SPRITE_SIZE);
+                                                 let px = (group.width as u32 - w as u32 - 1) * SPRITE_SIZE;
+                                                 let py = (group.height as u32 - h as u32 - 1) * SPRITE_SIZE;
 
                                                  imageops::overlay(&mut sheet, &img_buffer, (fx + px) as i64, (fy + py) as i64);
                                              }
@@ -2777,6 +2901,7 @@ pub fn run() {
             parse_dat_file_bin,
             search_things_bin,
             find_similar_bin,
+            find_by_image_bin,
             clear_dat_data,
             write_sprite_png,
             read_sprite_png,

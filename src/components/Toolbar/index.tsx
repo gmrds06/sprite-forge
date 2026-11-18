@@ -44,6 +44,7 @@ import { SceneEditorDialog } from '~/components/SceneEditor';
 import { LoadOptions } from '~/components/FolderSelectDialog';
 import { useLuaPanels } from '~/usecase/lua/LuaPanelsContext';
 import { UpdateIndicator } from '~/components/UpdateIndicator';
+import { ReferenceImageTab } from '~/components/ReferenceImageTab';
 import { useTransfer } from '~/usecase/context/TransferContext';
 import { LuaScriptsDialog } from '~/components/LuaScriptsDialog';
 import { useAssetData } from '~/usecase/context/AssetDataContext';
@@ -913,6 +914,8 @@ export const Toolbar = () => {
 						</MenubarContent>
 					</MenubarMenu>
 				</Menubar>
+
+				<ReferenceImageTab />
 
 				<div className="ml-auto text-[11px] text-muted-foreground flex-shrink-0 flex items-center gap-2">
 					<UpdateIndicator updater={updater} />
